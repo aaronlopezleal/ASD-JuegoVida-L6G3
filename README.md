@@ -19,16 +19,19 @@ Gonzalo Benítez Barquero
 ## Índice
 
 - [1. Descripción del proyecto](#1-descripción-del-proyecto)
-- [2. Objetivo](#2-objetivo)
-- [3. Problema elegido: Juego de la Vida](#3-problema-elegido-juego-de-la-vida)
-- [4. Análisis del paralelismo](#4-análisis-del-paralelismo)
-- [5. Versiones implementadas](#5-versiones-implementadas)
-- [6. Parámetros de ejecución](#6-parámetros-de-ejecución)
-- [7. Resultados locales](#7-resultados-locales)
-- [8. Resultados en clúster](#8-resultados-en-clúster)
-- [9. Compilación y ejecución](#9-compilación-y-ejecución)
-- [10. Estructura del repositorio](#10-estructura-del-repositorio)
-- [11. Conclusiones](#11-conclusiones)
+- [2. Objetivos](#2-objetivos)
+- [3. Plataforma experimental](#3-plataforma-experimental)
+- [4. Problema elegido: Juego de la Vida](#4-problema-elegido-juego-de-la-vida)
+- [5. Análisis del código secuencial](#5-análisis-del-código-secuencial)
+- [6. Análisis de dependencias](#6-análisis-de-dependencias)
+- [7. Ley de Amdahl](#7-ley-de-amdahl)
+- [8. Modelo del tejado e intensidad aritmética](#8-modelo-del-tejado-e-intensidad-aritmética)
+- [9. Versiones implementadas](#9-versiones-implementadas)
+- [10. Resultados locales](#10-resultados-locales)
+- [11. Resultados en clúster](#11-resultados-en-clúster)
+- [12. Compilación y ejecución](#12-compilación-y-ejecución)
+- [13. Estructura del repositorio](#13-estructura-del-repositorio)
+- [14. Conclusiones](#14-conclusiones)
 
 ---
 
@@ -38,9 +41,10 @@ Este repositorio contiene el proyecto final de la asignatura **Arquitectura de S
 
 El trabajo consiste en analizar, optimizar y paralelizar una simulación del **Juego de la Vida de Conway**, comparando distintas implementaciones y evaluando su rendimiento experimentalmente.
 
-El proyecto parte de una versión secuencial sencilla y evoluciona progresivamente hacia versiones optimizadas y paralelas usando:
+El proyecto parte de una versión secuencial sencilla y evoluciona progresivamente hacia versiones optimizadas y paralelas usando distintas técnicas vistas en la asignatura:
 
 - optimización de memoria;
+- análisis del paralelismo disponible;
 - OpenMP;
 - MPI;
 - combinación MPI + OpenMP;
@@ -51,13 +55,12 @@ El objetivo principal no es únicamente obtener una versión rápida, sino justi
 
 ---
 
-## 2. Objetivo
+## 2. Objetivos
 
-El objetivo del proyecto es aplicar distintas técnicas de optimización y paralelización sobre un mismo problema computacional para estudiar su impacto en el rendimiento.
-
-En concreto, se busca:
+Los objetivos principales del proyecto son:
 
 - partir de una implementación secuencial correcta;
+- estudiar el comportamiento del código base;
 - identificar dependencias y paralelismo disponible;
 - mejorar la representación de memoria;
 - aplicar paralelismo en memoria compartida mediante OpenMP;
@@ -66,11 +69,48 @@ En concreto, se busca:
 - implementar una versión GPU mediante CUDA;
 - validar que todas las versiones producen el mismo resultado;
 - comparar tiempos, speedup, eficiencia y escalabilidad;
-- ejecutar versiones distribuidas en un clúster real.
+- ejecutar versiones distribuidas en un clúster real;
+- extraer conclusiones sobre los límites de rendimiento de cada técnica.
 
 ---
 
-## 3. Problema elegido: Juego de la Vida
+## 3. Plataforma experimental
+
+Para que los experimentos sean replicables, se documenta la plataforma local utilizada para la toma principal de resultados.
+
+### Plataforma local
+
+| Elemento | Valor |
+|---|---|
+| Sistema operativo | Windows 11 Home 10.0.26200 |
+| CPU | Intel Core i5-14600KF |
+| Frecuencia reportada | ~3.5 GHz |
+| RAM | 32 GB Corsair DDR5 |
+| Velocidad RAM | 4800 MHz |
+| GPU | NVIDIA GeForce RTX 4060 |
+| Compilación C++ | Visual Studio, configuración Release x64 |
+| OpenMP | Activado mediante `/openmp` |
+| MPI local | Microsoft MPI |
+| CUDA | CUDA Toolkit 13.2.1 |
+
+### Plataforma de clúster
+
+También se realizaron pruebas en el clúster de la asignatura.
+
+| Elemento | Valor |
+|---|---|
+| Entorno | Clúster de la asignatura |
+| Grupo | L6G3 |
+| Nodos | 3 máquinas virtuales Ubuntu 24.04 |
+| Compilador MPI | `mpicxx` |
+| Ejecución MPI | `mpirun` con archivo `hostfile` |
+| OpenMP en clúster | `-fopenmp`, `OMP_NUM_THREADS=2` |
+
+No se incluyen capturas ni direcciones internas del clúster en el repositorio por privacidad y limpieza del proyecto.
+
+---
+
+## 4. Problema elegido: Juego de la Vida
 
 El **Juego de la Vida de Conway** es un autómata celular bidimensional. Cada celda de una matriz puede estar en uno de dos estados:
 
@@ -90,7 +130,50 @@ La simulación se realiza sobre una matriz `N x N` durante un número fijo de ge
 
 ---
 
-## 4. Análisis del paralelismo
+## 5. Análisis del código secuencial
+
+La versión secuencial base implementa directamente las reglas del Juego de la Vida.
+
+La estructura general del algoritmo es:
+
+```text
+Inicializar matriz inicial
+Para cada generación:
+    Para cada celda interior:
+        Contar vecinas vivas
+        Aplicar reglas del Juego de la Vida
+    Intercambiar matriz actual y matriz siguiente
+Contar células vivas finales
+```
+
+Para evitar que la actualización de una celda afecte al cálculo de otras celdas dentro de la misma generación, se usa doble buffer:
+
+```text
+grid      -> matriz de la generación actual
+nextGrid  -> matriz de la generación siguiente
+```
+
+Cada celda lee únicamente de `grid` y escribe su nuevo estado en `nextGrid`.
+
+El intercambio entre generaciones se realiza con:
+
+```cpp
+std::swap(grid, nextGrid);
+```
+
+Esto evita copiar toda la matriz al final de cada generación.
+
+Además, se define explícitamente el tratamiento de bordes:
+
+```text
+Los bordes de la matriz permanecen siempre muertos.
+```
+
+Esto simplifica el cálculo y evita accesos fuera de los límites de la matriz.
+
+---
+
+## 6. Análisis de dependencias
 
 El Juego de la Vida tiene una dependencia temporal clara:
 
@@ -98,16 +181,34 @@ El Juego de la Vida tiene una dependencia temporal clara:
 Generación g  ->  Generación g + 1
 ```
 
-Esto implica que no se puede calcular una generación futura sin haber completado la anterior.
+Esto significa que no se puede calcular la generación `g + 1` sin haber completado previamente la generación `g`.
 
-Sin embargo, dentro de una misma generación, el cálculo de cada celda es independiente siempre que se use doble buffer:
+Sin embargo, dentro de una misma generación, las celdas son independientes entre sí si se usa doble buffer.
+
+El cálculo de una celda puede representarse así:
 
 ```text
-grid      -> matriz de la generación actual
-nextGrid  -> matriz de la generación siguiente
+Generación g:
+
+(i-1,j-1)   (i-1,j)   (i-1,j+1)
+(i,  j-1)   (i,  j)   (i,  j+1)
+(i+1,j-1)   (i+1,j)   (i+1,j+1)
+
+        ↓
+
+Generación g+1:
+
+          (i,j)
 ```
 
-Cada celda lee únicamente de `grid` y escribe su resultado en `nextGrid`. Esto evita condiciones de carrera y permite paralelizar el cálculo de las celdas.
+La nueva celda `(i,j)` en la generación siguiente depende de las ocho vecinas y del estado anterior de la celda en la generación actual.
+
+Por tanto:
+
+- no se pueden paralelizar libremente las generaciones;
+- sí se puede paralelizar el cálculo de las celdas dentro de una misma generación;
+- el uso de doble buffer elimina condiciones de carrera;
+- el patrón de cómputo es regular y adecuado para paralelismo de datos.
 
 ### Tipos de paralelismo explotados
 
@@ -122,7 +223,79 @@ Cada celda lee únicamente de `grid` y escribe su resultado en `nextGrid`. Esto 
 
 ---
 
-## 5. Versiones implementadas
+## 7. Ley de Amdahl
+
+La Ley de Amdahl permite razonar sobre el límite teórico de aceleración cuando solo una parte del programa puede paralelizarse.
+
+La fórmula general es:
+
+```text
+Speedup máximo = 1 / ((1 - P) + P / n)
+```
+
+donde:
+
+- `P` es la fracción paralelizable del programa;
+- `n` es el número de unidades de ejecución;
+- `1 - P` es la parte secuencial que no puede paralelizarse.
+
+En este proyecto, la parte más costosa es el cálculo de las celdas en cada generación, que es altamente paralelizable. Sin embargo, existen partes que limitan la aceleración máxima:
+
+- inicialización de la matriz;
+- conteo final de células vivas;
+- sincronización entre generaciones;
+- reducción de resultados;
+- comunicación entre procesos MPI;
+- intercambio de filas fantasma;
+- lanzamiento de kernels CUDA;
+- copias entre CPU y GPU.
+
+Esto explica por qué la eficiencia disminuye al aumentar el número de hilos o procesos. Aunque haya mucho paralelismo disponible, siempre existen costes no paralelizables o de coordinación.
+
+---
+
+## 8. Modelo del tejado e intensidad aritmética
+
+El modelo del tejado, o *Roofline Model*, relaciona el rendimiento de un programa con dos límites principales:
+
+- capacidad de cálculo del procesador;
+- ancho de banda de memoria.
+
+Una magnitud importante es la **intensidad aritmética**:
+
+```text
+IA = operaciones aritméticas / bytes transferidos
+```
+
+En el Juego de la Vida, para calcular una celda se realizan pocas operaciones aritméticas, pero se accede a varios datos de memoria:
+
+- lectura de 8 vecinas;
+- lectura de la celda actual;
+- escritura de la nueva celda.
+
+Usando enteros de 4 bytes, una estimación simple es:
+
+```text
+Lecturas: 9 enteros  ->  36 bytes
+Escrituras: 1 entero ->   4 bytes
+Total aproximado     ->  40 bytes por celda
+```
+
+El número de operaciones por celda es reducido: sumas para contar vecinos y comparaciones para aplicar las reglas.
+
+Por tanto, el algoritmo tiene una intensidad aritmética relativamente baja. Esto significa que su rendimiento puede estar muy condicionado por:
+
+- localidad de memoria;
+- eficiencia de caché;
+- ancho de banda de memoria;
+- coste de comunicación en MPI;
+- transferencias CPU-GPU en CUDA.
+
+Esta observación justifica la mejora de V2 al usar memoria contigua y también explica por qué añadir más hilos o procesos no siempre produce una aceleración lineal.
+
+---
+
+## 9. Versiones implementadas
 
 | Versión | Técnica | Descripción |
 |---|---|---|
@@ -213,6 +386,8 @@ Al finalizar la simulación, el número total de células vivas se obtiene media
 MPI_Reduce
 ```
 
+El tiempo medido en MPI corresponde al máximo tiempo entre procesos, ya que el tiempo total de la simulación distribuida queda determinado por el proceso más lento.
+
 ### V5 - MPI + OpenMP
 
 La versión híbrida combina las dos estrategias anteriores:
@@ -239,7 +414,7 @@ La dependencia entre generaciones se mantiene, pero dentro de cada generación s
 
 ---
 
-## 6. Parámetros de ejecución
+## 10. Resultados locales
 
 Para comparar las versiones de forma justa, se usaron los mismos parámetros principales:
 
@@ -251,21 +426,11 @@ const int SEMILLA = 12345;
 const double PROB_VIVA = 0.30;
 ```
 
-El tratamiento de bordes se definió de forma explícita:
-
-```text
-Los bordes de la matriz permanecen siempre muertos.
-```
-
 Todas las versiones se validaron comprobando el mismo resultado final:
 
 ```text
 Células vivas finales = 43306
 ```
-
----
-
-## 7. Resultados locales
 
 Resultados obtenidos en ejecución local:
 
@@ -297,7 +462,7 @@ Speedup V6 = 1.92701 / 0.0181502 = 106.17x
 
 ---
 
-## 8. Resultados en clúster
+## 11. Resultados en clúster
 
 También se realizaron pruebas en el clúster de la asignatura usando tres máquinas virtuales Ubuntu asignadas al grupo.
 
@@ -321,7 +486,7 @@ Aun así, ambas versiones se ejecutaron correctamente en un entorno distribuido 
 
 ---
 
-## 9. Compilación y ejecución
+## 12. Compilación y ejecución
 
 ### V1 y V2
 
@@ -406,7 +571,7 @@ v6_cuda.exe
 
 ---
 
-## 10. Estructura del repositorio
+## 13. Estructura del repositorio
 
 ```text
 ASD-JuegoVida-L6G3/
@@ -423,7 +588,7 @@ ASD-JuegoVida-L6G3/
 
 ---
 
-## 11. Conclusiones
+## 14. Conclusiones
 
 La evolución del proyecto permite observar el impacto de distintas técnicas de optimización y paralelización sobre un mismo problema computacional.
 
